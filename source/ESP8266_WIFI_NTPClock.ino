@@ -5,33 +5,44 @@
   ******************************************************************************
   * @attention
   *
-  *  2023 TeIn
+  *  2023, 2024 TeIn
   *  https://blog.naver.com/bieemiho92
   *
   *  Target Device : ESP8266 0.96" OLED Board
   *
   *  IDE :
-  *     Arduino IDE 2.2.0
+  *     Arduino IDE 2.3.2
   *
   *  Dependancy    :
   *    ESP8266 board support package
   *       http://arduino.esp8266.com/stable/package_esp8266com_index.json
   *    U8g2-2.34.22
   *    NTPClient-3.2.1
+  *    AM2302-Sensor-1.3.2
+  *    LiquidCrystal_I2C-1.1.2
+  *
+  *
+  * @note
+  *   Ver.02 (2024/04) :
+  *     - Supports I2C Character LCD
+  *     - Supports AM2302 Sensor
+  *   Ver.01 (2023/10) :
+  *     - Initial Release
   *
   ******************************************************************************
   */
 
-
 /* Includes ------------------------------------------------------------------*/
-#include <Arduino.h>      // basics
-#include <Wire.h>         // I2C communication for OLED
-#include <U8g2lib.h>      // U8g2 graphic lib
-#include <ESP8266WiFi.h>  // ESP8266 Wi-Fi
-#include <WiFiUdp.h>      //
-#include <NTPClient.h>    // NTP Time
-#include <time.h>         // for getting timestamp from date
+#include <Arduino.h>              // basics
+#include <Wire.h>                 // I2C communication for OLED
+#include <U8g2lib.h>              // U8g2 graphic lib
+#include <ESP8266WiFi.h>          // ESP8266 Wi-Fi
+#include <WiFiUdp.h>              //
+#include <NTPClient.h>            // NTP Time
+#include <time.h>                 // for getting timestamp from date
 
+#include <AM2302-Sensor.h>        // AM2302 Sensor
+#include <LiquidCrystal_I2C.h>    // I2C CLCD
 
 
 /* Defines -------------------------------------------------------------------*/
@@ -39,7 +50,7 @@
 /* Macros --------------------------------------------------------------------*/
 
 /*** Debug Msg ***/
-// #define DBG_LOG_EN_LOOP               1
+// #define DBG_LOG_EN_LOOP            1
 // #define DBG_LOG_EN                 1
 // #define DBG_DISP_ALL_FOUND_AP      1
 
@@ -71,6 +82,7 @@
 #define INTERVAL_WIFI_CONNECTION_CHK  10      // seconds
 #define INTERVAL_WIFI_RECONNECTION    59      // (num+1)*(INTERVAL_WIFI_CONNECTION_CHK) seconds  (set 10 min @ release)
 #define INTERVAL_GET_TIME_FROM_NET    1800    // seconds // (set 30 min @ release)
+#define INTERVAL_READ_AM2302          10      // 10 seconds
 
 /**
  * @brief TIMER
@@ -91,9 +103,17 @@
 #define KEYPRESS_SHORT_TH             1       // (num+1)*(timer callback interval)  (0.2 sec)
 #define KEYPRESS_LONG_TH              14      // (num+1)*(timer callback interval)  (1.5 sec)
 
-#define FW_VER                        1       // 231002
+#define FW_VER                        2       // 240118
+// #define FW_VER                     1       // 231002
 
-
+/**
+ * @brief I2C Character LCD
+ * @note  tested on 20x4 CLCD
+ *        modify THIS section & some codes to fit your device.
+ */
+#define CLCD_I2C_ADDR                 0x27
+#define CLCD_COL_NUM                  20
+#define CLCD_ROW_NUM                  4
 
 /* Types ---------------------------------------------------------------------*/
 
@@ -275,13 +295,14 @@ char              currFwVer[2];                // for string
 volatile uint32_t uptime_WiFiconnection = 0;
 volatile uint32_t uptime_WiFiLost       = 0;
 volatile uint32_t uptime_LastTimeSynced = 0;
+volatile uint32_t uptime_LastSensorRead = 0;  // AM2302
 volatile uint8_t  bLEDState             = 0;  // reserved
 volatile uint32_t dwFLASHKEYpressedtime = 0;
 
-uint8_t           bProgressBarStatus    = 1;  // 0: NOT display   / else: display
+uint8_t           bProgressBarStatus    = 0;  // 0: NOT display   / else: display
 uint32_t          g_lcd_yPos            = 10;
 const char        *my_board_name        = "[Wi-Fi Clock]";
-
+const char        *my_board_name2       = "::: Wi-Fi  Clock :::";
 
 /**
  * @brief stores current state
@@ -314,6 +335,13 @@ volatile uint32_t g_state               = 0;
 #define G_STATE_BIT_POS_TIME_RESYNC_REQ         19
 #define G_STATE_BIT_POS_KEYPRESS_SHORT_REQ      20
 #define G_STATE_BIT_POS_KEYPRESS_LONG_REQ       21
+#define G_STATE_BIT_POS_AM2302_READ_REQ         22
+
+/*** AM2302 Sensor ***/
+volatile uint8_t  isSensorPresent = 0;
+
+/*** I2C Character LCD ***/
+volatile uint8_t  isCLCDPresent = 0;
 
 
 
@@ -327,6 +355,7 @@ void      utc_timestamp_to_date(timestamp_t timestamp, datetime_t* datetime);
 unsigned long GetTodayBaseTimeStamp(datetime_t *datetime);
 void      disp_ssid(uint8_t MODE);
 void      update_disp_clock(uint8_t MODE);
+void      update_disp_clock_CLCD(uint8_t MODE);
 void      blinkInternalLED_Polling(uint32_t dwRepeatCount, uint32_t dwDelay_ms);
 uint8_t   WLAN_Connect(uint8_t MODE, uint8_t LCD_DISP_EN);
 
@@ -353,6 +382,20 @@ U8G2_SSD1306_128X64_NONAME_F_SW_I2C u8g2(U8G2_R0, 14, 12, U8X8_PIN_NONE);
  *                        udp / poolservername / offset_sec / updateinterval_ms
  */
 NTPClient timeClient(ntpUDP, strTimeSvrURL, dwLocalTimeZoneOffset, 60000);
+
+/**
+ * @brief
+ * AM2302 Temperature & Humnidity Sensor
+ */
+#define AM2302_SENSOR_PIN                         13  // D7 OK...
+auto AM2302_Status = 0;                               // Sensor Readout
+AM2302::AM2302_Sensor am2302{AM2302_SENSOR_PIN};
+
+/**
+ * @brief
+ * Character LCD
+ */
+LiquidCrystal_I2C lcd(CLCD_I2C_ADDR, CLCD_ROW_NUM, CLCD_COL_NUM);
 
 
 /* User code -----------------------------------------------------------------*/
@@ -557,23 +600,25 @@ void disp_ssid(uint8_t MODE)
   else if(3 == MODE)
     u8g2.drawGlyph(2, (g_lcd_yPos+2), ICO_MAGNIFIER);
 
-
   // text
-  u8g2.setFont(u8g2_font_tiny5_tr);
   // line1
+  u8g2.setFont(u8g2_font_tiny5_tr);
   u8g2.drawStr(16, g_lcd_yPos, my_board_name);
+//   u8g2.drawStr(16, g_lcd_yPos, String(WiFi.localIP()+" ("+WiFi.macAddress()+")").c_str() );
   g_lcd_yPos = g_lcd_yPos + LCD_Y_INC_u8g2_font_tiny5_tr;
+
   // line2
-  if(0 == MODE)
+  if(0 == MODE)         // offline
     u8g2.drawStr(16, g_lcd_yPos, (String(disp_no_connection+" ("+foundmyAPssid+")")).c_str());
-  else if(1 == MODE)
+  else if(1 == MODE)    // online
     u8g2.drawStr(16, g_lcd_yPos, foundmyAPssid.c_str());
-  else if(2 == MODE)
+  else if(2 == MODE)    // time syncing
     u8g2.drawStr(16, g_lcd_yPos, strTimeSynced.c_str());
-  else if(3 == MODE)
+  else if(3 == MODE)    // conncting
     u8g2.drawStr(16, g_lcd_yPos, strWiFiScanOngoing.c_str());
 
   g_lcd_yPos = g_lcd_yPos + LCD_Y_INC_u8g2_font_tiny5_tr;
+
   // display!
   u8g2.sendBuffer();
 
@@ -604,8 +649,14 @@ void update_disp_clock(uint8_t MODE)
   u8g2.setDrawColor(1);
 
   // check bar is display (1)
-  (bProgressBarStatus) ? (g_lcd_yPos = LCD_Y_OFFSET_CLOCK) : (g_lcd_yPos = LCD_Y_OFFSET_CLOCK+8);
-
+  if(isSensorPresent)
+  {
+    g_lcd_yPos = 28;
+  }
+  else
+  {
+    (bProgressBarStatus) ? (g_lcd_yPos = LCD_Y_OFFSET_CLOCK) : (g_lcd_yPos = LCD_Y_OFFSET_CLOCK+8);
+  }
   // update date
   utc_timestamp_to_date(currentEpochTime, &datetime);
   u8g2.setFont(u8g2_font_tiny5_tr);   // font for date
@@ -633,6 +684,27 @@ void update_disp_clock(uint8_t MODE)
     //  second
     u8g2.drawStr(0, g_lcd_yPos, dispBar[( currentEpochTime % 60 )] );
   }
+  else
+  {
+    if(isSensorPresent)
+    {
+      g_lcd_yPos = LCD_Y_OFFSET_PROGRESSBAR;
+
+      u8g2.setFont(u8g2_font_spleen5x8_me);   // font for text
+      u8g2.drawStr(LCD_X_OFFSET_CLOCK, (g_lcd_yPos-3), "Temp('C) ");
+
+      u8g2.setFont(u8g2_font_9x6LED_mn);      // font for value
+      String tmpString = String(am2302.get_Temperature());  // returns previous readout value
+      u8g2.drawStr(LCD_X_OFFSET_CLOCK+55, g_lcd_yPos, tmpString.c_str());
+      g_lcd_yPos = g_lcd_yPos + 10;
+
+      u8g2.setFont(u8g2_font_spleen5x8_me);   // font for text
+      u8g2.drawStr(LCD_X_OFFSET_CLOCK, (g_lcd_yPos-3), "Humid(%) ");
+      u8g2.setFont(u8g2_font_9x6LED_mn);      // font for value
+      tmpString = String(am2302.get_Humidity());            // returns previous readout value
+      u8g2.drawStr(LCD_X_OFFSET_CLOCK+55, g_lcd_yPos, tmpString.c_str());
+    }
+  }
   // display
   u8g2.sendBuffer();
 
@@ -642,6 +714,46 @@ void update_disp_clock(uint8_t MODE)
   (0 == datetime.second) ? (digitalWrite(ESP8266_LED_PIN, ESP8266_LED_ON)) : (digitalWrite(ESP8266_LED_PIN, ESP8266_LED_OFF));
 
   return;
+
+}
+
+
+
+
+/**
+  * @brief      update clock display (to CLCD)
+  * @param      MODE    (reserved for further use)
+  * @return     none
+  * @note       display as...
+  *                 20x4                        16x2
+  *                 "::: Wi-Fi  Clock :::"      "    hh:mm:ss    "
+  *                 "                    "      " YYYY-MM-DD MMM "
+  *                 "      hh:mm:ss      "
+  *                 "   YYYY-MM-DD MMM   "
+  */
+void update_disp_clock_CLCD(uint8_t MODE)
+{
+  if(!isCLCDPresent)
+    return;
+
+  if((CLCD_ROW_NUM > 2) && (CLCD_COL_NUM > 16))     // 20x4
+  {
+    lcd.setCursor(6,2);
+    lcd.print(timeClient.getFormattedTime().c_str());
+    lcd.setCursor(3,3);
+    lcd.print(strCurrDate.c_str());
+    lcd.setCursor(14,3);
+    lcd.print(daysOfTheWeek[timeClient.getDay()]);
+  }
+  else                                              // 16x2
+  {
+    lcd.setCursor(5,0);
+    lcd.print(timeClient.getFormattedTime().c_str());
+    lcd.setCursor(1,1);
+    lcd.print(strCurrDate.c_str());
+    lcd.setCursor(13,1);
+    lcd.print(daysOfTheWeek[timeClient.getDay()]);
+  }
 
 }
 
@@ -910,6 +1022,18 @@ void ICACHE_RAM_ATTR onTimerISR()
     G_STATE_SET_BIT(G_STATE_BIT_POS_TIME_RESYNC_REQ);
   }
 
+  // AM2302 Sensor Read
+  if(isSensorPresent)
+  {
+    if( (timeClient.getEpochTime() - uptime_LastSensorRead) > INTERVAL_READ_AM2302)
+    {
+      uptime_LastSensorRead = timeClient.getEpochTime();
+
+      // set flag to do update
+      G_STATE_SET_BIT(G_STATE_BIT_POS_AM2302_READ_REQ);
+    }
+  }
+
   // check key pressed
   if( 0 == digitalRead(ESP8266_FLASH_KEY) )
   {
@@ -971,6 +1095,7 @@ void setup()
   // LCD Graphic Library
   u8g2.begin();
 
+  // ...
   delay(2500);
   blinkInternalLED_Polling(5, 100);
 
@@ -993,7 +1118,7 @@ void setup()
   g_lcd_yPos = g_lcd_yPos + LCD_Y_INC_u8g2_font_tiny5_tr;
   // line3
   u8g2.drawStr(5,g_lcd_yPos, "FW Ver : ");
-  itoa(FW_VER, currFwVer, 2);
+  itoa(FW_VER, currFwVer, 10);                // FW V02 : Fix radix to decimal
   u8g2.drawStr(35,g_lcd_yPos, currFwVer);
   u8g2.drawStr(48,g_lcd_yPos, __DATE__);
   u8g2.drawStr(92,g_lcd_yPos, __TIME__);
@@ -1005,28 +1130,86 @@ void setup()
   g_lcd_yPos += LCD_Y_INC_u8g2_font_tiny5_tr;
   // line6
   u8g2.drawStr(0,g_lcd_yPos, "  https://blog.naver.com/bieemiho92");
+  g_lcd_yPos += LCD_Y_INC_u8g2_font_tiny5_tr;
+  //line7
+  g_lcd_yPos += LCD_Y_INC_u8g2_font_tiny5_tr;
+  // line8
+  u8g2.drawStr(0,g_lcd_yPos, "  Device MAC Address : ");
+  g_lcd_yPos += 10;
+  // line9 - display own MAC address
+  u8g2.setFont(u8g2_font_NokiaSmallBold_tr);
+  u8g2.drawStr(10, g_lcd_yPos, WiFi.macAddress().c_str());
+
   // display!
   u8g2.sendBuffer();
 
   // 1st splash - serial teminal
+  Serial.printf("\r\n\r\n\r\n");
   Serial.println("*******************************************************************************");
-  Serial.println("\t[Wi-Fi Clock]");
+  Serial.printf("\t%s", my_board_name);
   Serial.println();
-  Serial.printf("\tFW VER x%02X (Build @  %s %s)\r\n\r\n", FW_VER, __DATE__, __TIME__);
+  Serial.printf("\tFW VER x%02X\t(Build @  %s %s)\r\n", FW_VER, __DATE__, __TIME__);
+  Serial.printf("\tMAC Addr :\t");
+  Serial.println(WiFi.macAddress());
   Serial.println();
   Serial.println("*******************************************************************************");
 
-  delay(1500);
+  delay(1000);
 
   /**
    *    Initialize hardware & libraries (2)
    */
+
+  // I2C Character LCD --- check whether LCD is present
+  Wire.begin();
+  delay(100);
+  if( (Wire.requestFrom(CLCD_I2C_ADDR, 1)))
+  {
+    Serial.println(">> CLCD is present.");
+    isCLCDPresent = 1;
+  }
+  else
+  {
+    Serial.println(">> CLCD is NOT present.");
+    isCLCDPresent = 0;
+  }
+  // Wire.end();         // disable I2C --- esp8266 doesn't support this.
+
+  if(isCLCDPresent)
+  {
+    lcd.init();         // calls Wire.begin() internally.
+    lcd.backlight();
+    lcd.setCursor(0,0);
+    lcd.printstr(my_board_name2);
+    lcd.setCursor(1,1);
+    lcd.print(WiFi.macAddress().c_str());
+  }
+
+  // AM2302 : Start
+  if(am2302.begin())
+  {
+    Serial.println(">> AM2302 Sensor is present.");
+    isSensorPresent = 1;
+  }
+  else
+  {
+    Serial.println(">> AM2302 Sensor is NOT present.");
+    isSensorPresent = 0;
+  }
+
   // Wi-Fi : station(client) mode, disconnect previous connection
   Serial.print(">> Init Wi-Fi...");
   WiFi.mode(WIFI_STA);  WiFi.disconnect();  delay(1000);
   Serial.println("Done!");
 
   Serial.println(">> Connect to Wi-Fi...");
+
+  if(isCLCDPresent)
+  {
+    (CLCD_ROW_NUM > 2) ? (lcd.setCursor(0,2)) : (lcd.setCursor(0,0));
+    lcd.print("Connect Network.. ");
+  }
+
   while( !(WLAN_Connect(0, 1)) )   // return 1 when establish connect.
   {
     delay(1000);                // retry every 1 sec.
@@ -1036,6 +1219,12 @@ void setup()
    *    Refresh Display because connected Wi-Fi.
    */
   Serial.printf(">> Connected to %s\r\n", foundmyAPssid);
+
+  if(isCLCDPresent)
+  {
+    lcd.print("OK");
+  }
+
   // clear display
   u8g2.clearDisplay();
   // clear buffer
@@ -1061,6 +1250,12 @@ void setup()
   timeClient.begin();
   Serial.printf(">> Update Time from %s ... ", strTimeSvrURL);
 
+  if(isCLCDPresent)
+  {
+    (CLCD_ROW_NUM > 2) ? (lcd.setCursor(0,3)) : (lcd.setCursor(0,1));
+    lcd.print("Update Time..     ");
+  }
+
   // line3
   u8g2.drawStr(2,g_lcd_yPos, "Update Time from : ");
   g_lcd_yPos += LCD_Y_INC_u8g2_font_tiny5_tr;
@@ -1068,8 +1263,6 @@ void setup()
   u8g2.drawStr(10,g_lcd_yPos, strTimeSvrURL);
   g_lcd_yPos += LCD_Y_INC_u8g2_font_tiny5_tr;
   // line5
-  g_lcd_yPos += LCD_Y_INC_u8g2_font_tiny5_tr;
-  // line6
   u8g2.drawStr(2,g_lcd_yPos, "Please wait a few seconds...");
   g_lcd_yPos += LCD_Y_INC_u8g2_font_tiny5_tr;
   u8g2.sendBuffer();
@@ -1084,15 +1277,46 @@ void setup()
     delay(1000);
   }
 
+  if(isCLCDPresent)
+  {
+    lcd.print("OK");
+  }
+
   Serial.println("Done!");
-  // line7
+
+  // Display Own IP Address to console
+  Serial.printf(">> Own IP : ");
+  Serial.println(WiFi.localIP());
+
+  // line6
   u8g2.drawStr(2,g_lcd_yPos, "Done!");
   g_lcd_yPos += LCD_Y_INC_u8g2_font_tiny5_tr;
   u8g2.drawStr(2,g_lcd_yPos, "Change to Clock Mode...");
   g_lcd_yPos += LCD_Y_INC_u8g2_font_tiny5_tr;
+  // line7
+  if(isSensorPresent)
+  {
+    u8g2.drawStr(2,g_lcd_yPos, "AM2302 Sensor is ON-LINE");
+  }
+  else
+  {
+    u8g2.drawStr(2,g_lcd_yPos, "AM2302 Sensor is OFFLINE");
+  }
+  g_lcd_yPos += LCD_Y_INC_u8g2_font_tiny5_tr;
   u8g2.sendBuffer();
 
+  /**
+   *    I2C Character LCD
+   */
+  if(isCLCDPresent)
+  {
+    u8g2.drawStr(2,g_lcd_yPos, "I2C CLCD is attached");
+    u8g2.sendBuffer();
+    lcd.clear();
+  }
+
   delay(1500);
+
 
   /**
    *    before entering loop(),
@@ -1130,6 +1354,12 @@ void setup()
 
   // for clock font
   u8g2.setFont(u8g2_font_12x6LED_mn); // perfect monospace font
+
+  if(isCLCDPresent)
+  {
+    lcd.setCursor(0,0);
+    lcd.printstr(my_board_name2);
+  }
 
   // start timer
   timer1_attachInterrupt(onTimerISR);
@@ -1194,6 +1424,7 @@ void loop()
   if( G_STATE_IS_SET(G_STATE_BIT_POS_CLOCK_DISP_REDRAW_REQ) )
   {
     update_disp_clock(0);
+    update_disp_clock_CLCD(0);
 
     G_STATE_CLR_BIT(G_STATE_BIT_POS_CLOCK_DISP_REDRAW_REQ);
 
@@ -1285,4 +1516,13 @@ void loop()
 
   }
 
+  if( G_STATE_IS_SET(G_STATE_BIT_POS_AM2302_READ_REQ) )
+  {
+    AM2302_Status = am2302.read();
+#ifdef DBG_LOG_EN_LOOP
+    Serial.printf(">> AM2302 Readout => 0x%02X\r\n", AM2302_Status);
+#endif
+
+    G_STATE_CLR_BIT(G_STATE_BIT_POS_AM2302_READ_REQ);
+  }
 }
