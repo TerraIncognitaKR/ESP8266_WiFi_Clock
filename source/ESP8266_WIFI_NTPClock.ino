@@ -5,7 +5,7 @@
   ******************************************************************************
   * @attention
   *
-  *  2023, 2024 TeIn
+  *  2023, 2024, 2025 TeIn
   *  https://blog.naver.com/bieemiho92
   *
   *  Target Device : ESP8266 0.96" OLED Board
@@ -20,9 +20,13 @@
   *    NTPClient-3.2.1
   *    AM2302-Sensor-1.3.2
   *    LiquidCrystal_I2C-1.1.2
-  *
+  *    Adafruit AHTX0-2.0.5     (+incl. req. dep.)
+  *    Adafruit BMP280-2.6.8    (+incl. req. dep.)
   *
   * @note
+  *   Ver.03 (2025/01) :
+  *     - Supports AHT20+BMP280 Sensor
+  *     - Web Server
   *   Ver.02 (2024/04) :
   *     - Supports I2C Character LCD
   *     - Supports AM2302 Sensor
@@ -43,7 +47,16 @@
 
 #include <AM2302-Sensor.h>        // AM2302 Sensor
 #include <LiquidCrystal_I2C.h>    // I2C CLCD
+#include <Adafruit_AHTX0.h>       // AHT20
+#include <Adafruit_BMP280.h>      // BMP280
 
+#include "misc.h"
+
+#include <ESP8266WebServer.h>
+// #include <ESP8266WebServer-impl.h>
+// #include <ESP8266WebServerSecure.h>
+// #include <Parsing-impl.h>
+// #include <Uri.h>
 
 /* Defines -------------------------------------------------------------------*/
 
@@ -82,7 +95,7 @@
 #define INTERVAL_WIFI_CONNECTION_CHK  10      // seconds
 #define INTERVAL_WIFI_RECONNECTION    59      // (num+1)*(INTERVAL_WIFI_CONNECTION_CHK) seconds  (set 10 min @ release)
 #define INTERVAL_GET_TIME_FROM_NET    1800    // seconds // (set 30 min @ release)
-#define INTERVAL_READ_AM2302          10      // 10 seconds
+#define INTERVAL_READ_SENSOR          10      // 10 seconds
 
 /**
  * @brief TIMER
@@ -103,7 +116,8 @@
 #define KEYPRESS_SHORT_TH             1       // (num+1)*(timer callback interval)  (0.2 sec)
 #define KEYPRESS_LONG_TH              14      // (num+1)*(timer callback interval)  (1.5 sec)
 
-#define FW_VER                        2       // 240118
+#define FW_VER                        3       //
+// #define FW_VER                     2       // 240118
 // #define FW_VER                     1       // 231002
 
 /**
@@ -143,152 +157,29 @@ char        daysOfTheWeek[7][12]  = {"SUN", "MON", "TUE", "WED", "THU", "FRI", "
 // char currMinute[4];
 // char currSecond[4];
 const char  *strTimeSvrURL        = "time2.kriss.re.kr";
-int         dwLocalTimeZoneOffset      = 32400;          // GMT+9
+int         dwLocalTimeZoneOffset = 32400;          // GMT+9
 String      strCurrDate;
 String      strTimeSynced         = "CLOCK SYNCHRONIZED :)";
 String      strWiFiScanOngoing    = "SCANNING...";
 
 /*** hard-coded progress bar ***/
-#if 1
-char dispBar[60][63] =
-{
-  "[|                                                           ]",     //  0
-  "[||                                                          ]",     //  1
-  "[|||                                                         ]",     //  2
-  "[||||                                                        ]",     //  3
-  "[|||||                                                       ]",     //  4
-  "[||||||                                                      ]",     //  5
-  "[|||||||                                                     ]",     //  6
-  "[||||||||                                                    ]",     //  7
-  "[|||||||||                                                   ]",     //  8
-  "[||||||||||                                                  ]",     //  9
-  "[|||||||||||                                                 ]",     //  10
-  "[||||||||||||                                                ]",     //  11
-  "[|||||||||||||                                               ]",     //  12
-  "[||||||||||||||                                              ]",     //  13
-  "[|||||||||||||||                                             ]",     //  14
-  "[||||||||||||||||                                            ]",     //  15
-  "[|||||||||||||||||                                           ]",     //  16
-  "[||||||||||||||||||                                          ]",     //  17
-  "[|||||||||||||||||||                                         ]",     //  18
-  "[||||||||||||||||||||                                        ]",     //  19
-  "[|||||||||||||||||||||                                       ]",     //  20
-  "[||||||||||||||||||||||                                      ]",     //  21
-  "[|||||||||||||||||||||||                                     ]",     //  22
-  "[||||||||||||||||||||||||                                    ]",     //  23
-  "[|||||||||||||||||||||||||                                   ]",     //  24
-  "[||||||||||||||||||||||||||                                  ]",     //  25
-  "[|||||||||||||||||||||||||||                                 ]",     //  26
-  "[||||||||||||||||||||||||||||                                ]",     //  27
-  "[|||||||||||||||||||||||||||||                               ]",     //  28
-  "[||||||||||||||||||||||||||||||                              ]",     //  29
-  "[|||||||||||||||||||||||||||||||                             ]",     //  30
-  "[||||||||||||||||||||||||||||||||                            ]",     //  31
-  "[|||||||||||||||||||||||||||||||||                           ]",     //  32
-  "[||||||||||||||||||||||||||||||||||                          ]",     //  33
-  "[|||||||||||||||||||||||||||||||||||                         ]",     //  34
-  "[||||||||||||||||||||||||||||||||||||                        ]",     //  35
-  "[|||||||||||||||||||||||||||||||||||||                       ]",     //  36
-  "[||||||||||||||||||||||||||||||||||||||                      ]",     //  37
-  "[|||||||||||||||||||||||||||||||||||||||                     ]",     //  38
-  "[||||||||||||||||||||||||||||||||||||||||                    ]",     //  39
-  "[|||||||||||||||||||||||||||||||||||||||||                   ]",     //  40
-  "[||||||||||||||||||||||||||||||||||||||||||                  ]",     //  41
-  "[|||||||||||||||||||||||||||||||||||||||||||                 ]",     //  42
-  "[||||||||||||||||||||||||||||||||||||||||||||                ]",     //  43
-  "[|||||||||||||||||||||||||||||||||||||||||||||               ]",     //  44
-  "[||||||||||||||||||||||||||||||||||||||||||||||              ]",     //  45
-  "[|||||||||||||||||||||||||||||||||||||||||||||||             ]",     //  46
-  "[||||||||||||||||||||||||||||||||||||||||||||||||            ]",     //  47
-  "[|||||||||||||||||||||||||||||||||||||||||||||||||           ]",     //  48
-  "[||||||||||||||||||||||||||||||||||||||||||||||||||          ]",     //  49
-  "[|||||||||||||||||||||||||||||||||||||||||||||||||||         ]",     //  50
-  "[||||||||||||||||||||||||||||||||||||||||||||||||||||        ]",     //  51
-  "[|||||||||||||||||||||||||||||||||||||||||||||||||||||       ]",     //  52
-  "[||||||||||||||||||||||||||||||||||||||||||||||||||||||      ]",     //  53
-  "[|||||||||||||||||||||||||||||||||||||||||||||||||||||||     ]",     //  54
-  "[||||||||||||||||||||||||||||||||||||||||||||||||||||||||    ]",     //  55
-  "[|||||||||||||||||||||||||||||||||||||||||||||||||||||||||   ]",     //  56
-  "[||||||||||||||||||||||||||||||||||||||||||||||||||||||||||  ]",     //  57
-  "[||||||||||||||||||||||||||||||||||||||||||||||||||||||||||| ]",     //  58
-  "[||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||]"      //  59
-};
-#else
-char dispBar[60][63] =
-{
-  " .                                                            ",     //  0
-  " ..                                                           ",     //  1
-  " ...                                                          ",     //  2
-  " ....                                                         ",     //  3
-  " .....                                                        ",     //  4
-  " ......                                                       ",     //  5
-  " .......                                                      ",     //  6
-  " ........                                                     ",     //  7
-  " .........                                                    ",     //  8
-  " ..........                                                   ",     //  9
-  " ...........                                                  ",     //  10
-  " ............                                                 ",     //  11
-  " .............                                                ",     //  12
-  " ..............                                               ",     //  13
-  " ...............                                              ",     //  14
-  " ................                                             ",     //  15
-  " .................                                            ",     //  16
-  " ..................                                           ",     //  17
-  " ...................                                          ",     //  18
-  " ....................                                         ",     //  19
-  " .....................                                        ",     //  20
-  " ......................                                       ",     //  21
-  " .......................                                      ",     //  22
-  " ........................                                     ",     //  23
-  " .........................                                    ",     //  24
-  " ..........................                                   ",     //  25
-  " ...........................                                  ",     //  26
-  " ............................                                 ",     //  27
-  " .............................                                ",     //  28
-  " ..............................                               ",     //  29
-  " ...............................                              ",     //  30
-  " ................................                             ",     //  31
-  " .................................                            ",     //  32
-  " ..................................                           ",     //  33
-  " ...................................                          ",     //  34
-  " ....................................                         ",     //  35
-  " .....................................                        ",     //  36
-  " ......................................                       ",     //  37
-  " .......................................                      ",     //  38
-  " ........................................                     ",     //  39
-  " .........................................                    ",     //  40
-  " ..........................................                   ",     //  41
-  " ...........................................                  ",     //  42
-  " ............................................                 ",     //  43
-  " .............................................                ",     //  44
-  " ..............................................               ",     //  45
-  " ...............................................              ",     //  46
-  " ................................................             ",     //  47
-  " .................................................            ",     //  48
-  " ..................................................           ",     //  49
-  " ...................................................          ",     //  50
-  " ....................................................         ",     //  51
-  " .....................................................        ",     //  52
-  " ......................................................       ",     //  53
-  " .......................................................      ",     //  54
-  " ........................................................     ",     //  55
-  " .........................................................    ",     //  56
-  " ..........................................................   ",     //  57
-  " ...........................................................  ",     //  58
-  " ............................................................ "      //  59
-};
-#endif
+extern char dispBar[60][63];
+
 
 /*** Wi-Fi Access Point information ***/
 String      foundmyAPssid;
-const char  *my_own_ap_ssid      = "input your ssid";
-const char  *my_own_ap_password  = "input your password of my_own_ap_ssid";
-String      disp_no_connection   = "OFFLINE";
+const char  *my_own_ap_ssid     = "TERRA-****";
+const char  *my_own_ap_password = "****";
+String      disp_no_connection  = "OFFLINE";
+const char  *softap_password    = "****";
 
 
 /*** NTP Time ***/
 WiFiUDP ntpUDP;
 
+/*** Strings of Current Temperature & Humidity ***/
+String StrTemp;
+String StrHumid;
 
 /*** Internal ***/
 char              currFwVer[2];                // for string
@@ -335,14 +226,22 @@ volatile uint32_t g_state               = 0;
 #define G_STATE_BIT_POS_TIME_RESYNC_REQ         19
 #define G_STATE_BIT_POS_KEYPRESS_SHORT_REQ      20
 #define G_STATE_BIT_POS_KEYPRESS_LONG_REQ       21
-#define G_STATE_BIT_POS_AM2302_READ_REQ         22
+#define G_STATE_BIT_POS_SENSOR_READ_REQ         22
+
+/*** (Global) Sensor ***/
+volatile uint8_t  isSensorPresent = 0;
 
 /*** AM2302 Sensor ***/
-volatile uint8_t  isSensorPresent = 0;
+volatile uint8_t  isAM2302Present = 0;
 
 /*** I2C Character LCD ***/
 volatile uint8_t  isCLCDPresent = 0;
 
+/*** AHTx0  Sensor ***/
+volatile uint8_t  isAHTx0Present = 0;
+
+/*** BMP280 Sensor ***/
+volatile uint8_t  isBMP280Present = 0;
 
 
 
@@ -367,8 +266,11 @@ void ICACHE_RAM_ATTR onTimerISR();
 /**
  * @brief
  * U8g2 constructor --- rotation, pinNumber_SCL, pinNumber_SDA, pinNumber_RESET
+ * some clone boards uses different pin assign.
+ * modify pin number of SCL/SDA if CLCD doesn't work.
  */
-U8G2_SSD1306_128X64_NONAME_F_SW_I2C u8g2(U8G2_R0, 14, 12, U8X8_PIN_NONE);
+U8G2_SSD1306_128X64_NONAME_F_SW_I2C u8g2(U8G2_R0, 14, 12, U8X8_PIN_NONE);     // case 1
+// U8G2_SSD1306_128X64_NONAME_F_SW_I2C u8g2(U8G2_R0, 12, 14, U8X8_PIN_NONE);  // case 2
 
 /**
  * @brief
@@ -396,6 +298,22 @@ AM2302::AM2302_Sensor am2302{AM2302_SENSOR_PIN};
  * Character LCD
  */
 LiquidCrystal_I2C lcd(CLCD_I2C_ADDR, CLCD_ROW_NUM, CLCD_COL_NUM);
+
+/**
+ * @brief
+ * Web Server
+ */
+#define PORT_WEBSERVER  2000    // default : 80
+ESP8266WebServer myServer(PORT_WEBSERVER);
+
+/**
+ * @brief
+ * AHTx0 & BMP280
+ */
+Adafruit_BMP280   bmp280;
+Adafruit_AHTX0    ahtx0;
+sensors_event_t   aht_humid, aht_temp;
+
 
 
 /* User code -----------------------------------------------------------------*/
@@ -688,21 +606,34 @@ void update_disp_clock(uint8_t MODE)
   {
     if(isSensorPresent)
     {
+      if(isAHTx0Present)
+      {
+        StrTemp  = String(aht_temp.temperature);
+        StrHumid = String(aht_humid.relative_humidity);
+      }
+      else if(isAM2302Present)
+      {
+        StrTemp  = String(am2302.get_Temperature());
+        StrHumid = String(am2302.get_Humidity());
+      }
+      else if(isBMP280Present)
+      {
+        StrTemp  = String(bmp280.readTemperature());
+        StrHumid = "--.-";
+      }
+
       g_lcd_yPos = LCD_Y_OFFSET_PROGRESSBAR;
 
       u8g2.setFont(u8g2_font_spleen5x8_me);   // font for text
       u8g2.drawStr(LCD_X_OFFSET_CLOCK, (g_lcd_yPos-3), "Temp('C) ");
-
       u8g2.setFont(u8g2_font_9x6LED_mn);      // font for value
-      String tmpString = String(am2302.get_Temperature());  // returns previous readout value
-      u8g2.drawStr(LCD_X_OFFSET_CLOCK+55, g_lcd_yPos, tmpString.c_str());
+      u8g2.drawStr(LCD_X_OFFSET_CLOCK+55, g_lcd_yPos, StrTemp.c_str());
       g_lcd_yPos = g_lcd_yPos + 10;
 
       u8g2.setFont(u8g2_font_spleen5x8_me);   // font for text
       u8g2.drawStr(LCD_X_OFFSET_CLOCK, (g_lcd_yPos-3), "Humid(%) ");
       u8g2.setFont(u8g2_font_9x6LED_mn);      // font for value
-      tmpString = String(am2302.get_Humidity());            // returns previous readout value
-      u8g2.drawStr(LCD_X_OFFSET_CLOCK+55, g_lcd_yPos, tmpString.c_str());
+      u8g2.drawStr(LCD_X_OFFSET_CLOCK+55, g_lcd_yPos, StrHumid.c_str());
     }
   }
   // display
@@ -796,8 +727,9 @@ void      blinkInternalLED_Polling(uint32_t dwRepeatCount, uint32_t dwDelay_ms)
 /**
   * @brief      Search my Wi-Fi Access Point & Connect
   * @param      MODE
-  *               0       : search and connect
-  *               (else)  : connect directly by hard-coded information
+  *               DEC 70   : connect directly by hard-coded information ('F')
+  *               else     : search and connect
+  *
   * @param      LCD_DISP_EN
   *               0       : NOT display connection procedure on LCD
   *               (else)  : display connection procedure on LCD
@@ -917,12 +849,15 @@ uint8_t   WLAN_Connect(uint8_t MODE, uint8_t LCD_DISP_EN)
 
   /////////////////////////////////////////////////////////////////////////////
 
+  // FW V03 : bug fix <- can't continue when MODE=true
+  if(MODE==70)  isfindmyAP=true;
+
   if(isfindmyAP)  // found my AP. proceed to connect
   {
     Serial.printf(">> [%s] Found! connecting to '%s'...\r\n", __FUNCTION__, foundmyAPssid.c_str());
 
     // connect to my AP
-    if(MODE)    // connect directly by hard-coded information. previous scan routines are useless :)
+    if(MODE==70)    // connect directly by hard-coded information. previous scan routines are useless :)
       WiFi.begin(my_own_ap_ssid, my_own_ap_password);
     else        // connect to found AP
       WiFi.begin(foundmyAPssid, my_own_ap_password);
@@ -935,6 +870,7 @@ uint8_t   WLAN_Connect(uint8_t MODE, uint8_t LCD_DISP_EN)
       g_lcd_yPos += LCD_Y_INC_u8g2_font_tiny5_tr;
       u8g2.drawStr(2, g_lcd_yPos, foundmyAPssid.c_str());
       g_lcd_yPos += LCD_Y_INC_u8g2_font_tiny5_tr;
+
       // icon (line1 & line2)
       g_lcd_yPos = LCD_Y_POS_INIT;
       u8g2.setFont(u8g2_font_siji_t_6x10);
@@ -1022,15 +958,15 @@ void ICACHE_RAM_ATTR onTimerISR()
     G_STATE_SET_BIT(G_STATE_BIT_POS_TIME_RESYNC_REQ);
   }
 
-  // AM2302 Sensor Read
+  // Temperature & Humidity Sensor Read
   if(isSensorPresent)
   {
-    if( (timeClient.getEpochTime() - uptime_LastSensorRead) > INTERVAL_READ_AM2302)
+    if( (timeClient.getEpochTime() - uptime_LastSensorRead) > INTERVAL_READ_SENSOR)
     {
       uptime_LastSensorRead = timeClient.getEpochTime();
 
       // set flag to do update
-      G_STATE_SET_BIT(G_STATE_BIT_POS_AM2302_READ_REQ);
+      G_STATE_SET_BIT(G_STATE_BIT_POS_SENSOR_READ_REQ);
     }
   }
 
@@ -1189,17 +1125,52 @@ void setup()
   if(am2302.begin())
   {
     Serial.println(">> AM2302 Sensor is present.");
-    isSensorPresent = 1;
+    isAM2302Present = 1;
   }
   else
   {
     Serial.println(">> AM2302 Sensor is NOT present.");
-    isSensorPresent = 0;
+    isAM2302Present = 0;
   }
+
+  // AHTx0
+  if(ahtx0.begin())
+  {
+    Serial.println(">> AHTx0 Sensor is present.");
+    ahtx0.getEvent(&aht_humid, &aht_temp);  // read 1st
+    isAHTx0Present = 1;
+  }
+  else
+  {
+    Serial.println(">> AHTx0 Sensor is NOT present.");
+    isAHTx0Present = 0;
+  }
+
+  // BMP280
+  if(bmp280.begin())
+  {
+    Serial.println(">> BMP280 Sensor is present.");
+    isBMP280Present = 1;
+    bmp280.setSampling(Adafruit_BMP280::MODE_NORMAL,     /* Operating Mode. */
+                       Adafruit_BMP280::SAMPLING_X2,     /* Temp. oversampling */
+                       Adafruit_BMP280::SAMPLING_X16,    /* Pressure oversampling */
+                       Adafruit_BMP280::FILTER_X16,      /* Filtering. */
+                       Adafruit_BMP280::STANDBY_MS_500); /* Standby time. */
+  }
+  else
+  {
+    Serial.println(">> BMP280 Sensor is NOT present.");
+    isBMP280Present = 0;
+  }
+
+  /** set flag to indicate sensor is present */
+  if(isAM2302Present || isAHTx0Present || isBMP280Present)
+    isSensorPresent = 1;
 
   // Wi-Fi : station(client) mode, disconnect previous connection
   Serial.print(">> Init Wi-Fi...");
-  WiFi.mode(WIFI_STA);  WiFi.disconnect();  delay(1000);
+  WiFi.mode(WIFI_AP_STA);             // WiFi.mode(WIFI_STA)
+  WiFi.disconnect();  delay(1000);
   Serial.println("Done!");
 
   Serial.println(">> Connect to Wi-Fi...");
@@ -1291,19 +1262,20 @@ void setup()
   // line6
   u8g2.drawStr(2,g_lcd_yPos, "Done!");
   g_lcd_yPos += LCD_Y_INC_u8g2_font_tiny5_tr;
+  u8g2.drawStr(2,g_lcd_yPos, String(WiFi.localIP().toString()).c_str());
+  g_lcd_yPos += LCD_Y_INC_u8g2_font_tiny5_tr;
   u8g2.drawStr(2,g_lcd_yPos, "Change to Clock Mode...");
   g_lcd_yPos += LCD_Y_INC_u8g2_font_tiny5_tr;
   // line7
   if(isSensorPresent)
   {
-    u8g2.drawStr(2,g_lcd_yPos, "AM2302 Sensor is ON-LINE");
+    u8g2.drawStr(2,g_lcd_yPos, "Sensor is ON-LINE");
   }
   else
   {
-    u8g2.drawStr(2,g_lcd_yPos, "AM2302 Sensor is OFFLINE");
+    u8g2.drawStr(2,g_lcd_yPos, "Sensor is OFFLINE");
   }
   g_lcd_yPos += LCD_Y_INC_u8g2_font_tiny5_tr;
-  u8g2.sendBuffer();
 
   /**
    *    I2C Character LCD
@@ -1311,11 +1283,27 @@ void setup()
   if(isCLCDPresent)
   {
     u8g2.drawStr(2,g_lcd_yPos, "I2C CLCD is attached");
-    u8g2.sendBuffer();
     lcd.clear();
   }
+  u8g2.sendBuffer();
 
-  delay(1500);
+
+  /**
+   *    Long delay for display own IP address
+   */
+  delay(3000);
+
+
+  /**
+   *    !! disable !! Initialize Soft AP
+   */
+  // WiFi.softAP(my_board_name, softap_password);
+
+  /**
+   *    Initialize Web Server
+   */
+  myServer.on("/", myServer_Root);
+  myServer.begin();
 
 
   /**
@@ -1369,7 +1357,7 @@ void setup()
   // refresh time from NTP server before entering loop()
   timeClient.update();
 
-}
+}   /*** void setup() ***/
 
 
 
@@ -1516,13 +1504,94 @@ void loop()
 
   }
 
-  if( G_STATE_IS_SET(G_STATE_BIT_POS_AM2302_READ_REQ) )
+  if( G_STATE_IS_SET(G_STATE_BIT_POS_SENSOR_READ_REQ) )
   {
-    AM2302_Status = am2302.read();
-#ifdef DBG_LOG_EN_LOOP
-    Serial.printf(">> AM2302 Readout => 0x%02X\r\n", AM2302_Status);
-#endif
+    // readout from one of attached sensor
+    if(isAHTx0Present)             // 1st
+    {
+      ahtx0.getEvent(&aht_humid, &aht_temp);
+      // Serial.print(">> AHT20 Humidity(% rH) : ");
+      // Serial.println(aht_humid.relative_humidity);
+      // Serial.print(">> AHT20 Temp('C') : ");
+      // Serial.println(aht_temp.temperature);
+      // Serial.println("Read AHTx0");
+    }
+    else if(isAM2302Present)       // 2nd
+    {
+      am2302.read();
+      // am2302.get_Temperature();
+      // am2302.get_Humidity();
+      // Serial.println("Read AM2302");
+    }
+    else if(isBMP280Present)       // 3rd
+    {
+      // BMP280 doesn't support humidity
+      //  bmp280.readTemperature();
+      //  bmp280.readPressure();      // units : Pa
+      // Serial.println("Read BMP280");
+    }
+    else
+    {
+      // no sensor - do nothing
+    }
 
-    G_STATE_CLR_BIT(G_STATE_BIT_POS_AM2302_READ_REQ);
+    G_STATE_CLR_BIT(G_STATE_BIT_POS_SENSOR_READ_REQ);
   }
+
+  // Handling Web Server
+  myServer.handleClient();
+
+}   /*** void loop() ***/
+
+
+
+/**
+ * @brief   root page of web server
+ * @param   none
+ * @return  none
+ * @note    can be access when Soft-AP is not running
+ */
+void myServer_Root(void)
+{
+  String message;
+  String reserve(5000);
+
+  message  = F("<!DOCTYPE html>\n"
+              "<html>\n"
+              "<head>\n"
+              "<meta charset=\"UTF-8\">\n"
+              "<meta http-equiv=\"Refresh\" content=\"5\">\n"
+              "<title>"
+              );
+  message += (my_board_name);
+  message += F("</title>\n");
+  message += F("</head>\n");
+  message += F("<body>\n");
+  message += F("<h1> ");
+  message += (strCurrDate.c_str());
+  message += F("  ");
+  message += (timeClient.getFormattedTime().c_str());
+  message += F("  (");
+  message += (daysOfTheWeek[timeClient.getDay()]);
+  message += F(")\n");
+  message += F("</h1>\n");
+  message += F("<p> ");
+  message += F("Temp  (℃)    ");
+  message += (StrTemp.c_str());
+  message += F("<br>");
+  message += F("Humid (%)    ");
+  message += (StrHumid.c_str());
+  message += F("</p> ");
+  message += F("<p> ");
+  message += F("*** this page is refresh automatically abut every 5 seconds ***");
+  message += F("</p> ");
+  message += F("</body>\n");
+  message += F("</html>\n");
+
+  // Serial.println("WebServer");
+  // myServer.send(200, "text/plane", "Hello world!");
+  // myServer.send(200, "text/plane", timeClient.getFormattedTime().c_str());
+
+  myServer.send(200, "text/html", message);
+  return;
 }
